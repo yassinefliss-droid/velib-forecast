@@ -1,0 +1,12 @@
+data/*.db
+.venv/
+__pycache__/
+*.log
+secrets/
+airflow/home/
+dbt/target/
+dbt/logs/
+dbt/dbt_packages/
+.env
+dbt/.user.yml
+.pytest_cache/

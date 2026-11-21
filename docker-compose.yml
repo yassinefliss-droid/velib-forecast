@@ -1,0 +1,22 @@
+# Airflow local minimal : un seul conteneur ("standalone", métadonnées en SQLite).
+# Suffisant pour un projet personnel ; pas une config de production.
+services:
+  airflow:
+    build:
+      context: .
+      dockerfile: airflow/Dockerfile
+    command: standalone
+    # Même uid que ton utilisateur : les fichiers écrits (data/velib.db) t'appartiennent.
+    user: "${AIRFLOW_UID:-1000}:0"
+    ports:
+      - "8080:8080"
+    environment:
+      HOME: /opt/airflow
+      AIRFLOW_HOME: /opt/airflow
+      AIRFLOW__CORE__LOAD_EXAMPLES: "False"
+      AIRFLOW__CORE__DAGS_FOLDER: /opt/velib/airflow/dags
+      VELIB_GCP_KEY: /opt/velib/secrets/gcp-key.json
+    volumes:
+      - ./:/opt/velib              # code, data/velib.db, secrets, dbt, DAGs
+      - ./airflow/home:/opt/airflow
+    restart: unless-stopped

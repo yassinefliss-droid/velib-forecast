@@ -1,0 +1,13 @@
+velib:
+  target: dev
+  outputs:
+    dev:
+      type: bigquery
+      method: service-account
+      # Chemin de la clé : jamais la clé elle-même dans le dépôt
+      keyfile: "{{ env_var('VELIB_GCP_KEY', 'secrets/gcp-key.json') }}"
+      project: "{{ env_var('VELIB_GCP_PROJECT', 'velib-forecas') }}"
+      dataset: velib_data_base
+      location: US
+      threads: 4
+      job_execution_timeout_seconds: 300

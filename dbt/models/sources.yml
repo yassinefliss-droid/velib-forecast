@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: velib
+    description: "Tables brutes chargées par velib.bq (aucune transformation)."
+    schema: velib_data_base
+    tables:
+      - name: raw_station_status
+        description: "Une ligne par station et par snapshot du flux GBFS."
+      - name: raw_station_information
+        description: "État courant des stations (remplacé à chaque chargement)."

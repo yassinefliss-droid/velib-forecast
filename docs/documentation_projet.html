@@ -1,0 +1,168 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<title>Vélib' Forecast : documentation du projet</title>
+<style>
+  @page { size: A4; margin: 18mm 16mm 18mm 16mm; }
+  body { font-family: "DejaVu Sans", Arial, sans-serif; font-size: 9.6pt; line-height: 1.45; color: #1c1c1c; }
+  h1 { font-size: 22pt; margin: 0 0 4pt 0; color: #0b2d5b; }
+  .sub { color: #555; margin-bottom: 14pt; }
+  h2 { font-size: 14pt; color: #0b2d5b; border-bottom: 1.5px solid #0b2d5b; padding-bottom: 2pt; margin: 20pt 0 8pt 0; page-break-after: avoid; }
+  h3 { font-size: 11pt; margin: 12pt 0 4pt 0; page-break-after: avoid; }
+  table { border-collapse: collapse; width: 100%; margin: 6pt 0 10pt 0; font-size: 8.6pt; }
+  th { background: #0b2d5b; color: #fff; text-align: left; padding: 4pt 5pt; }
+  td { border: 0.6px solid #bbb; padding: 4pt 5pt; vertical-align: top; }
+  tr { page-break-inside: avoid; }
+  tr:nth-child(even) td { background: #f4f7fb; }
+  pre { background: #f3f3f3; border: 0.6px solid #ccc; padding: 6pt 8pt; font-family: "DejaVu Sans Mono", monospace; font-size: 7.6pt; line-height: 1.35; white-space: pre-wrap; page-break-inside: avoid; }
+  code { font-family: "DejaVu Sans Mono", monospace; font-size: 8.4pt; background: #f0f0f0; padding: 0 2pt; }
+  .note { border-left: 4px solid #c98a00; background: #fff8e6; padding: 6pt 9pt; margin: 8pt 0; page-break-inside: avoid; }
+  .ok { color: #1b6e2d; font-weight: bold; } .partial { color: #a15c00; font-weight: bold; } .todo { color: #a11d1d; font-weight: bold; }
+  .q { margin: 0 0 7pt 0; page-break-inside: avoid; } .q b { color: #0b2d5b; }
+  ul { margin: 3pt 0 6pt 16pt; padding: 0; }
+</style>
+</head>
+<body>
+
+<h1>Vélib' Forecast</h1>
+<div class="sub">Documentation du projet : architecture, problèmes rencontrés et résolutions, résultats réels<br>
+État au 21 novembre 2026. Les chiffres proviennent d'exécutions réelles ; ce qui n'a pas été vérifié est signalé comme tel.</div>
+
+<h2>1. Objectif et périmètre</h2>
+<p>Collecter la disponibilité des stations Vélib' Métropole (flux GBFS ouvert, sans clé d'API), construire un pipeline de données reproductible et contrôlé, puis prévoir à 1 heure le nombre de vélos disponibles par station en le comparant à une baseline naïve de persistance.</p>
+<p><b>Ce qui est fait :</b> collecte, contrôles qualité, entrepôt BigQuery, marts dbt, orchestration Airflow (en partie). <b>Ce qui reste :</b> le modèle de prévision, qui nécessite plusieurs jours d'historique. Aucune métrique de prévision n'existe à ce jour.</p>
+
+<h2>2. Architecture</h2>
+<pre>API GBFS Vélib'
+   |  toutes les 5 min (cron ; DAG velib_collect dans Airflow)
+   v
+Extract (requests) -> Transform (Pandas) -> Load SQLite --> contrôles qualité (data_quality_log)
+                                              |
+                                              |  velib.bq : charge les snapshots absents (rattrapage)
+                                              v
+                                        BigQuery : raw_station_status, raw_station_information
+                                              |  dbt, toutes les heures (DAG velib_transform)
+                                              v
+                    stg_*  ->  dim_station, fct_station_status, fct_station_5min,
+                               mart_features, mart_hourly_profile
+                                              |
+                                              +--> modèle (à venir) --> fct_forecast
+                                              +--> dashboard Streamlit</pre>
+<p><b>ETL ou ELT ?</b> Les deux. La collecte est un petit ETL (Pandas type et aplatit le JSON avant l'écriture). Le chargement dans BigQuery est quasi brut, et les transformations analytiques se font en SQL dans l'entrepôt avec dbt, donc en ELT.</p>
+
+<h2>3. État d'avancement et niveau de preuve</h2>
+<table>
+<tr><th style="width:27%">Bloc</th><th style="width:12%">État</th><th>Preuve</th></tr>
+<tr><td>ETL API vers SQLite, idempotent</td><td class="ok">Fait</td><td>1ʳᵉ exécution : 1526 lignes ; 2ᵉ exécution sur le même flux : 0 ligne</td></tr>
+<tr><td>Collecte toutes les 5 min (cron)</td><td class="ok">Actif</td><td>29 snapshots, 44 254 lignes, 1526 stations, sur 3 h 05 (collecte en cours)</td></tr>
+<tr><td>Contrôles qualité et journal</td><td class="ok">Fait</td><td>20 tests pytest sur données synthétiques ; résultats sur données réelles en section 5</td></tr>
+<tr><td>Chargement BigQuery (bac à sable)</td><td class="ok">Fait</td><td>Rattrapage de 5 snapshots (7630 lignes) observé dans les logs</td></tr>
+<tr><td>Marts dbt</td><td class="ok">Fait</td><td>7 modèles créés, 8 tests réussis (exécution de l'utilisateur)</td></tr>
+<tr><td>Orchestration Airflow (Docker)</td><td class="partial">Partiel</td><td>Image construite, 2 DAG chargés sans erreur, <code>velib_collect</code> réussi via <code>airflow dags test</code>. <code>velib_transform</code> non testé dans Airflow.</td></tr>
+<tr><td>Tableau de bord Streamlit</td><td class="partial">Code écrit</td><td>Syntaxe vérifiée, fonctions pures testées ; interface non validée à l'exécution</td></tr>
+<tr><td>Exploration (profils heure et jour)</td><td class="partial">Code écrit</td><td>Fonctionne, mais 3 h de données ne permettent aucune conclusion</td></tr>
+<tr><td>Modèle de prévision</td><td class="todo">À faire</td><td>Baseline de persistance, puis XGBoost ; visé : au moins 7 jours de données</td></tr>
+<tr><td>Dockerfile du projet</td><td class="todo">À faire</td><td>Seul le Dockerfile d'Airflow existe</td></tr>
+</table>
+
+<h2>4. Journal des problèmes et de leur résolution</h2>
+<table>
+<tr><th style="width:4%">N°</th><th style="width:20%">Problème / symptôme</th><th style="width:25%">Cause</th><th style="width:28%">Résolution</th><th>À retenir</th></tr>
+
+<tr><td>1</td><td>Timeout de connexion à l'API (<code>ConnectTimeout</code>), sur ma machine comme dans l'environnement de développement</td><td>Domaine donné de mémoire et erroné (<code>smoove.pro</code>)</td><td>Domaine corrigé en <code>velib-metropole-opendata.smovengo.cloud</code> (HTTP 200, 1526 stations)</td><td>Ne jamais coder une URL d'API de mémoire : un premier appel manuel (curl, navigateur) est la toute première étape.</td></tr>
+
+<tr><td>2</td><td>Confusion sur l'horodatage : un exemple « 1700000000 = 14 h » était présenté sans lien avec la réalité</td><td>Nombre inventé pour illustrer, heure associée fausse. C'est un timestamp Unix (secondes depuis le 1/1/1970 UTC).</td><td>Conversion réelle : <code>1795273767</code> = 2026-11-21 15:09:27 UTC. Script <code>inspect_api.py</code> qui affiche la date UTC.</td><td>Les horodatages de l'API sont en UTC ; convertir en heure de Paris avant d'analyser par heure.</td></tr>
+
+<tr><td>3</td><td><code>SyntaxError</code> en lançant la commande de conversion</td><td>L'espace réservé <code>&lt;LA_VALEUR&gt;</code> a été collé tel quel dans le code</td><td>Script <code>scripts/inspect_api.py</code> qui récupère la vraie valeur lui-même</td><td>Préférer un script qui fait tout à une commande à compléter à la main.</td></tr>
+
+<tr><td>4</td><td>Champs en double dans la réponse (<code>num_bikes_available</code> et <code>numBikesAvailable</code>)</td><td>Le flux expose deux conventions de nommage</td><td>Une seule convention conservée (snake_case, standard GBFS)</td><td>Choisir et documenter une convention ; ne pas stocker deux fois la même information.</td></tr>
+
+<tr><td>5</td><td>Risque de doublons à chaque exécution</td><td>Le cron se déclenche sans lien avec le rythme de rafraîchissement du flux</td><td>Clé primaire <code>(station_id, snapshot_ts)</code>, avec <code>snapshot_ts</code> = horodatage du flux (<code>lastUpdatedOther</code>), et <code>INSERT OR IGNORE</code>. Vérifié : 1526 lignes puis 0.</td><td>Idempotence : la clé identifie la donnée (quand elle a été mesurée), pas l'exécution. <code>last_reported</code> ne convient pas : il reste figé pour une station silencieuse.</td></tr>
+
+<tr><td>6</td><td>Le cron semblait marcher mais aucune donnée n'arrivait ; pas de fichier <code>etl.log</code></td><td>La crontab était vide : la ligne n'avait pas été enregistrée. Les snapshots existants venaient de lancements manuels.</td><td>Installation de la ligne par commande, puis vérification de <code>crontab -l</code>, de <code>etl.log</code> et de l'arrivée de snapshots</td><td>Vérifier le mécanisme lui-même (crontab, log), pas seulement un compteur qui peut augmenter pour une autre raison.</td></tr>
+
+<tr><td>7</td><td><code>ModuleNotFoundError</code> pour les bibliothèques Google lors des tests</td><td>Appel du <code>python3</code> du système au lieu de celui de l'environnement virtuel</td><td>Tests lancés avec <code>.venv/bin/python</code> ; le cron utilise aussi le chemin explicite du venv</td><td>Cron ne charge pas l'environnement du shell (pas d'activation du venv) : toujours donner le chemin complet.</td></tr>
+
+<tr><td>8</td><td>Avertissement de dépréciation pandas (<code>dayofweek</code>)</td><td>Pandas 3 déprécie cet attribut</td><td>Remplacé par <code>day_of_week</code></td><td>Lire les avertissements : ils annoncent les pannes futures.</td></tr>
+
+<tr><td>9</td><td>BigQuery : <code>403 ... bigquery.jobs.create</code></td><td>Le compte de service n'avait pas le rôle « Utilisateur de job BigQuery »</td><td>Rôle ajouté dans IAM (avec « Éditeur de données BigQuery »)</td><td>Lancer une requête et écrire des données sont deux permissions distinctes.</td></tr>
+
+<tr><td>10</td><td>BigQuery : <code>404 Not found: Dataset velib</code></td><td>Le dataset s'appelait <code>velib_data_base</code>, et sa région est US (pas EU)</td><td>Nom adapté ; région fixée dans le client. Rendu configurable (variables d'environnement).</td><td>Ne pas deviner un nom : lire la console. Une région différente n'est pas bloquante pour des données ouvertes.</td></tr>
+
+<tr><td>11</td><td>BigQuery n'impose pas de clé primaire : un rechargement dupliquerait les lignes</td><td>Entrepôt analytique, pas base transactionnelle</td><td><code>velib.bq.sync</code> compare les <code>snapshot_ts</code> locaux et distants et charge seulement les manquants. Démontré : 5 snapshots rattrapés d'un coup.</td><td>L'idempotence se construit dans le code ; le rattrapage répare aussi les pannes réseau.</td></tr>
+
+<tr><td>12</td><td>Insertion en streaming : écartée a priori</td><td>D'après ma connaissance de la documentation (non testé ici), le streaming exige la facturation, absente du bac à sable</td><td>Chargement par <i>load jobs</i> (lots), dont le fonctionnement dans le bac à sable a été vérifié</td><td>Le choix d'architecture dépend des contraintes du plan gratuit.</td></tr>
+
+<tr><td>13</td><td>dbt : avertissement sur le test <code>relationships</code> ; <code>dbt-core</code> 1.13.0b1 installé</td><td>Syntaxe dépréciée ; la dépendance acceptait une préversion</td><td>Paramètres déplacés sous <code>arguments</code> ; versions figées sur celles qui ont fonctionné (<code>dbt-bigquery==1.12.4</code>, <code>dbt-core==1.13.0b1</code>)</td><td>Figer les versions pour la reproductibilité ; signaler qu'une dépendance est une préversion.</td></tr>
+
+<tr><td>14</td><td>Airflow : risque de conflits de dépendances ; droits d'écriture sur <code>data/</code> ; mot de passe admin absent juste après le démarrage ; centaines de <code>SyntaxWarning</code> dans les logs</td><td>dbt et le projet n'ont pas les mêmes dépendances qu'Airflow ; utilisateur du conteneur différent du mien ; initialisation de la base ; paquet Azure de l'image</td><td>Deux environnements virtuels dédiés dans l'image ; conteneur lancé avec mon uid (1000) ; attente de l'initialisation ; avertissements ignorés (sans lien avec le projet)</td><td>Isoler les dépendances d'un orchestrateur ; distinguer le bruit des vraies erreurs.</td></tr>
+
+<tr><td>15</td><td>Une trentaine de fichiers vides à la racine du dépôt (<code>=</code>, <code>sha256:...</code>, <code>exporting</code>...)</td><td>Sortie du build Docker collée dans le terminal : les lignes commençant par <code>=&gt;</code> ont été exécutées comme des redirections</td><td>Fichiers vérifiés (0 octet) puis supprimés ; <code>git status</code> propre</td><td>Ne jamais coller une sortie de programme dans un shell ; vérifier le contenu avant de supprimer.</td></tr>
+
+<tr><td>16</td><td>Anomalies dans les données réelles (voir section 5)</td><td>Qualité de la source</td><td>Détection et journalisation par règle, sans suppression</td><td>Une station hors service est une information réelle, utile pour expliquer les erreurs d'un modèle.</td></tr>
+</table>
+
+<h2>5. Résultats réels</h2>
+<h3>Collecte (au 21/11/2026)</h3>
+<ul>
+<li>29 snapshots distincts, 44 254 lignes, 1526 stations, sur 3 h 05 (de 15:28 à 18:34 UTC).</li>
+<li>Écart minimal observé entre deux snapshots : 61 secondes. Ce minimum est une borne observée sur peu de points, pas la fréquence de rafraîchissement du flux.</li>
+<li>La collecte comporte des trous correspondant aux périodes où rien ne tournait.</li>
+</ul>
+<h3>Qualité des données (29 snapshots)</h3>
+<table>
+<tr><th>Règle</th><th>Gravité</th><th>Lignes</th><th>Stations distinctes</th></tr>
+<tr><td>not_renting_or_returning : installée mais location ou retour désactivé</td><td>info</td><td>1305</td><td>45</td></tr>
+<tr><td>out_of_service : non installée</td><td>info</td><td>116</td><td>4</td></tr>
+<tr><td>bikes_docks_exceed_capacity : vélos + places supérieur à la capacité</td><td>warning</td><td>341</td><td>13</td></tr>
+<tr><td>invalid_capacity : capacité NULL ou inférieure ou égale à 0</td><td>warning</td><td>174</td><td>6</td></tr>
+<tr><td>stale_report : écart de plus de 6 h entre le flux et last_reported</td><td>warning</td><td>667</td><td>23</td></tr>
+</table>
+<p>Aucune valeur manquante, aucune valeur négative, aucune station absente de <code>station_information</code>.</p>
+<div class="note"><b>À examiner.</b> Le seuil de 6 h de <code>stale_report</code> est arbitraire (à calibrer). L'écart maximal observé est de 181 351 511 secondes, soit environ 5,7 ans : ce n'est pas un retard mais une valeur par défaut ou aberrante de l'API. La cause n'est pas encore établie.</div>
+<h3>Marts dbt (exécution de l'utilisateur, 7 modèles, 8 tests réussis)</h3>
+<p>Lors de cette exécution : dim_station 1,5 k lignes ; fct_station_status 25,9 k ; fct_station_5min 21,4 k ; mart_features 21,4 k ; mart_hourly_profile 4,4 k. Avec quelques heures de données, la colonne cible <code>target_bikes_t_plus_60</code> de <code>mart_features</code> est presque entièrement NULL : le mart est correct dans sa structure mais pas encore exploitable pour l'entraînement.</p>
+
+<h2>6. Choix de conception à savoir expliquer</h2>
+<ul>
+<li><b>Grain explicite</b> de chaque table (écrit en commentaire dans chaque modèle dbt) : station et snapshot, station et créneau de 5 min, station, jour et heure.</li>
+<li><b>Grille régulière de 5 minutes</b> avant les variables retardées : « il y a 60 minutes » n'a de sens que sur des créneaux alignés. Les retards manquants restent NULL.</li>
+<li><b>Taux de remplissage</b> (vélos / capacité) pour comparer des stations de tailles différentes ; capacité invalide donne NaN, pas de division par zéro.</li>
+<li><b>Seules les stations opérationnelles</b> entrent dans les profils ; les autres restent dans la base.</li>
+<li><b>Deux DAG</b> : collecte toutes les 5 min, transformations toutes les heures. <code>catchup=False</code> : l'API ne donne pas le passé. <code>max_active_runs=1</code> : pas de collectes simultanées sur SQLite.</li>
+<li><b>La carte du tableau de bord lit la table brute</b>, pas les marts, qui ont jusqu'à 1 h de retard.</li>
+</ul>
+
+<h2>7. Préparation aux questions d'entretien</h2>
+<div class="q"><b>Pourquoi la clé d'idempotence utilise-t-elle l'horodatage du flux plutôt que <code>datetime.now()</code> ?</b><br>Avec l'heure d'exécution, deux passages sur le même flux produiraient deux clés différentes et donc des lignes dupliquées. Avec l'horodatage du flux, les mêmes données ont la même clé et la base ignore le doublon.</div>
+<div class="q"><b>Que font <code>INSERT</code>, <code>INSERT OR IGNORE</code> et <code>INSERT OR REPLACE</code> si la clé existe ?</b><br>Erreur et arrêt du lot ; ligne ignorée ; ligne écrasée. On ignore pour les mesures (une mesure passée ne change pas), on remplace pour la dimension des stations (nom ou capacité peuvent changer).</div>
+<div class="q"><b>Pourquoi donner <code>.venv/bin/python</code> dans le cron ?</b><br>Cron s'exécute avec un environnement minimal : il n'active pas le venv et n'a pas ton PATH. Sans chemin explicite, il utilise un Python sans les bibliothèques.</div>
+<div class="q"><b>Pourquoi journaliser les anomalies plutôt que supprimer les lignes ?</b><br>Supprimer fausse l'historique et masque des informations réelles. Une station hors service explique des erreurs de prévision ; la supprimer rendrait le modèle faussement bon.</div>
+<div class="q"><b>Pourquoi un taux de remplissage, et que se passe-t-il si on oublie de convertir de UTC vers l'heure de Paris ?</b><br>Le taux rend comparables des stations de capacités différentes. Sans conversion, les pics sont décalés de 1 h ou 2 h selon la saison, et les profils par heure sont faux.</div>
+<div class="q"><b>BigQuery ne vérifie pas les clés primaires : comment rendre le chargement idempotent ?</b><br>En comparant les <code>snapshot_ts</code> déjà présents à ceux à charger, et en chargeant seulement les manquants. Alternatives : un MERGE, ou un identifiant de job déterministe. En SQLite, c'est une contrainte du moteur ; ici, c'est du code.</div>
+<div class="q"><b>Pourquoi charger les snapshots manquants plutôt que seulement le dernier ?</b><br>Si BigQuery est injoignable une heure, « le dernier » perdrait les snapshots intermédiaires, alors que le rattrapage les envoie au passage suivant. Démontré : 5 snapshots rattrapés d'un coup.</div>
+<div class="q"><b>ETL ou ELT ?</b><br>Hybride : ETL pour la collecte (Pandas avant l'écriture), ELT pour l'analytique (SQL avec dbt dans BigQuery, à partir de données brutes conservées pour pouvoir rejouer les transformations).</div>
+<div class="q"><b>Pourquoi deux DAG, et pourquoi <code>catchup=False</code> ?</b><br>Les rythmes diffèrent (5 min contre 1 h) et reconstruire les marts toutes les 5 min est inutile. L'API ne donne pas le passé : rattraper des exécutions manquées ne retrouverait aucune donnée.</div>
+<div class="q"><b>Pourquoi ne pas remplir les NULL de la cible, et comment éviter la fuite d'information ?</b><br>La cible NULL des créneaux récents signifie « futur non observé » : la remplir par 0 ou par la dernière valeur fabriquerait une fausse réponse. Pour la fuite : les variables retardées n'utilisent que le passé, et la validation est temporelle (entraîner sur le passé, tester sur le futur), jamais aléatoire.</div>
+
+<h2>8. Limites connues</h2>
+<ul>
+<li>La collecte dépend d'une machine allumée : Airflow en local apporte l'orchestration, pas la disponibilité 24 h/24. Chaque interruption laisse un trou définitif.</li>
+<li>Peu d'historique : profils non interprétables, modèle non entraînable de façon sérieuse pour l'instant.</li>
+<li>Bac à sable BigQuery : expiration des tables (60 jours, d'après ma connaissance de la documentation, à revérifier) et opérations restreintes.</li>
+<li>Airflow « standalone » avec SQLite : montage de développement. <code>dbt-core</code> en préversion.</li>
+<li>Les tests automatiques utilisent des données synthétiques : ils valident la logique, pas le format réel de l'API ni BigQuery.</li>
+<li>Les contrôles qualité ne détectent pas encore les trous de collecte.</li>
+</ul>
+
+<h2>9. Prochaines étapes</h2>
+<ul>
+<li>Laisser la collecte tourner (au moins 7 jours) ; suivre <code>scripts/collection_report.py</code>.</li>
+<li>Valider <code>velib_transform</code> dans Airflow et le tableau de bord à l'exécution.</li>
+<li>Prévision à 1 h : baseline de persistance, puis XGBoost (variables retardées, heure, jour), validation temporelle glissante, comparaison des MAE, analyse des stations difficiles ; écriture dans <code>fct_forecast</code>.</li>
+<li>Dockerfile du projet et mise à jour du README avec les résultats mesurés.</li>
+</ul>
+
+</body>
+</html>

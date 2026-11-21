@@ -1,0 +1,32 @@
+version: 2
+
+models:
+  - name: dim_station
+    description: "Une ligne par station."
+    columns:
+      - name: station_id
+        tests: [unique, not_null]
+
+  - name: fct_station_status
+    description: "Une ligne par station et par snapshot."
+    columns:
+      - name: station_id
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_station')
+                field: station_id
+      - name: snapshot_ts
+        tests: [not_null]
+      - name: bikes
+        tests: [not_null]
+
+  - name: fct_station_5min
+    description: "Une ligne par station et par créneau de 5 minutes."
+
+  - name: mart_features
+    description: "Variables du modèle de prévision à +60 min (une ligne par station et créneau)."
+
+  - name: mart_hourly_profile
+    description: "Profil moyen par station, jour de semaine et heure (heure de Paris)."
